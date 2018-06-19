@@ -52,17 +52,20 @@ p3: PROJECT = vm
 p4: PROJECT = filesys
 
 # Tests that just compile the provided code.
+
 threads::
 	$(mk-sandbox)
 	$(compile)
 	$(run-tests) TESTS=tests/threads/alarm-single
 	$(test-clean)
 	$(clean)
+
 userprog vm filesys::
 	$(mk-sandbox)
 	$(compile)
 	$(test-clean)
 	$(clean)
+
 examples::
 	$(mk-sandbox)
 	$(compile)

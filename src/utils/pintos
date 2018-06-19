@@ -554,8 +554,6 @@ sub run_bochs {
     # Write bochsrc.txt configuration file.
     open (BOCHSRC, ">", "bochsrc.txt") or die "bochsrc.txt: create: $!\n";
     print BOCHSRC <<EOF;
-romimage: file=/home/si9ma/Drive/Arch/Factory/bochs-2.6.9/bios/BIOS-bochs-latest
-vgaromimage: file=/home/si9ma/Drive/Arch/Factory/bochs-2.6.9/bios/VGABIOS-lgpl-latest
 boot: disk
 cpu: ips=1000000
 megs: $mem
