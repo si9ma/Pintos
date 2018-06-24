@@ -407,7 +407,7 @@ bool sys_create(const char *filename, unsigned initial_size)
   check_user((const uint8_t *)filename);
 
   lock_acquire(&filesys_lock);
-  return_code = filesys_create(filename, initial_size);
+  return_code = filesys_create(filename, initial_size,false);
   lock_release(&filesys_lock);
   return return_code;
 }
@@ -920,7 +920,7 @@ bool sys_mkdir(const char *filename)
   check_user((const uint8_t *)filename);
 
   lock_acquire(&filesys_lock);
-  return_code = filesys_create(filename, 0);
+  return_code = filesys_create(filename, 0,true);
   lock_release(&filesys_lock);
 
   return return_code;
