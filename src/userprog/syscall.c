@@ -904,14 +904,15 @@ void unpin_preloaded_pages(const void *buffer, size_t size)
 
 bool sys_chdir(const char *filename)
 {
-  bool return_code;
-  check_user((const uint8_t *)filename);
+  // bool return_code;
+  // check_user((const uint8_t *)filename);
 
-  lock_acquire(&filesys_lock);
-  return_code = filesys_chdir(filename);
-  lock_release(&filesys_lock);
+  // lock_acquire(&filesys_lock);
+  // return_code = filesys_chdir(filename);
+  // lock_release(&filesys_lock);
 
-  return return_code;
+  // return return_code;
+  return 0;
 }
 
 bool sys_mkdir(const char *filename)
@@ -941,12 +942,12 @@ bool sys_readdir(int fd, char *name)
   if (inode == NULL)
     goto done;
 
-  // check whether it is a valid directory
-  if (!inode_is_directory(inode))
-    goto done;
+  // // check whether it is a valid directory
+  // if (!inode_is_directory(inode))
+  //   goto done;
 
-  ASSERT(file_d->dir != NULL); // see sys_open()
-  ret = dir_readdir(file_d->dir, name);
+  // ASSERT(file_d->dir != NULL); // see sys_open()
+  // ret = dir_readdir(file_d->dir, name);
 
 done:
   lock_release(&filesys_lock);
@@ -955,13 +956,14 @@ done:
 
 bool sys_isdir(int fd)
 {
-  lock_acquire(&filesys_lock);
+  // lock_acquire(&filesys_lock);
 
-  struct file_desc *file_d = find_file_desc(thread_current(), fd, FD_FILE | FD_DIRECTORY);
-  bool ret = inode_is_directory(file_get_inode(file_d->file));
+  // struct file_desc *file_d = find_file_desc(thread_current(), fd, FD_FILE | FD_DIRECTORY);
+  // bool ret = inode_is_directory(file_get_inode(file_d->file));
 
-  lock_release(&filesys_lock);
-  return ret;
+  // lock_release(&filesys_lock);
+  // return ret;
+  return 0;
 }
 
 int sys_inumber(int fd)
