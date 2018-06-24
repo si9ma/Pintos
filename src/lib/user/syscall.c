@@ -90,7 +90,6 @@ wait (pid_t pid)
     bool
 create (const char *file, unsigned initial_size)
 {
-    printf("si99999999999999999999ma");
     return syscall2 (SYS_CREATE, file, initial_size);
 }
 
