@@ -407,7 +407,7 @@ bool sys_create(const char *filename, unsigned initial_size)
   check_user((const uint8_t *)filename);
 
   lock_acquire(&filesys_lock);
-  return_code = filesys_create(filename, initial_size,false);
+  return_code = filesys_create(filename, initial_size, false);
   lock_release(&filesys_lock);
   return return_code;
 }
@@ -447,15 +447,14 @@ int sys_open(const char *file)
 
   fd->file = file_opened; //file save
 
-/* 暂时不对文件夹进行处理 */
-  // // directory handling
-  // struct inode *inode = file_get_inode(fd->file);
-  // if (inode != NULL && inode_is_directory(inode))
-  // {
-  //   fd->dir = dir_open(inode_reopen(inode));
-  // }
-  // else
-  //   fd->dir = NULL;
+  // directory handling
+  struct inode *inode = file_get_inode(fd->file);
+  if (inode != NULL && inode_is_directory(inode))
+  {
+    fd->dir = dir_open(inode_reopen(inode));
+  }
+  else
+    fd->dir = NULL;
 
   struct list *fd_list = &thread_current()->file_descriptors;
   if (list_empty(fd_list))
@@ -920,7 +919,7 @@ bool sys_mkdir(const char *filename)
   check_user((const uint8_t *)filename);
 
   lock_acquire(&filesys_lock);
-  return_code = filesys_create(filename, 0,true);
+  return_code = filesys_create(filename, 0, true);
   lock_release(&filesys_lock);
 
   return return_code;
@@ -941,12 +940,12 @@ bool sys_readdir(int fd, char *name)
   if (inode == NULL)
     goto done;
 
-  //   // check whether it is a valid directory
-  //   if (!inode_is_directory(inode))
-  //     goto done;
+  // check whether it is a valid directory
+  if (!inode_is_directory(inode))
+    goto done;
 
-  //   ASSERT(file_d->dir != NULL); // see sys_open()
-  //   ret = dir_readdir(file_d->dir, name);
+  ASSERT(file_d->dir != NULL); // see sys_open()
+  ret = dir_readdir(file_d->dir, name);
 
 done:
   lock_release(&filesys_lock);
@@ -957,11 +956,11 @@ bool sys_isdir(int fd)
 {
   lock_acquire(&filesys_lock);
 
-  // struct file_desc *file_d = find_file_desc(thread_current(), fd, FD_FILE | FD_DIRECTORY);
-  // bool ret = inode_is_directory(file_get_inode(file_d->file));
+  struct file_desc *file_d = find_file_desc(thread_current(), fd, FD_FILE | FD_DIRECTORY);
+  bool ret = inode_is_directory(file_get_inode(file_d->file));
 
-  // lock_release(&filesys_lock);
-  // return ret;
+  lock_release(&filesys_lock);
+  return ret;
   return 0;
 }
 
