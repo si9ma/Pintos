@@ -531,8 +531,8 @@ void sys_close(int fd)
   if (file_d && file_d->file)
   {
     file_close(file_d->file);
-    if (file_d->dir)
-      dir_close(file_d->dir);
+    // if (file_d->dir)
+    //   dir_close(file_d->dir);
     list_remove(&(file_d->elem));
     palloc_free_page(file_d);
   }
@@ -839,9 +839,10 @@ find_file_desc(struct thread *t, int fd, enum fd_search_filter flag)
       if (desc->id == fd)
       {
         // found. filter by flag to distinguish file and directorys
-        if (desc->dir != NULL && (flag & FD_DIRECTORY))
-          return desc;
-        else if (desc->dir == NULL && (flag & FD_FILE))
+        // if (desc->dir != NULL && (flag & FD_DIRECTORY))
+        //   return desc;
+        // else if (desc->dir == NULL && (flag & FD_FILE))
+        if (flag & FD_FILE)
           return desc;
       }
     }
