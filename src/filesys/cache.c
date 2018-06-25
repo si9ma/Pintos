@@ -139,7 +139,7 @@ void buffer_cache_read(block_sector_t sector, void *target)
       read_ahead(i);
     }
 
-    read_head_group_size = read_head_group_size  + 3;
+    read_head_group_size = read_head_group_size + 3;
   }
 
   lock_release(&buffer_cache_lock);
