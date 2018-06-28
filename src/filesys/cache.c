@@ -302,6 +302,7 @@ int is_cache_empty(cache_queue *queue)
  */
 void de_cache_queue(cache_queue *queue)
 {
+  ASSERT(lock_held_by_current_thread(&buffer_cache_lock));
   if (is_cache_empty(queue))
     return;
 
