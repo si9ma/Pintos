@@ -4,387 +4,451 @@
 #include "filesys/filesys.h"
 #include "threads/synch.h"
 
+/* Buffer cache 容量 */
 #define BUFFER_CACHE_SIZE 64
 
-// A Queue Node (Queue is implemented using Doubly Linked List)
+/* cache条目结构 */
 typedef struct buffer_cache_entry_t
 {
-  struct buffer_cache_entry_t *prev, *next;
+	struct buffer_cache_entry_t	*prev, *next;                   /* 双重指针 */
+	block_sector_t			disk_sector;                    /* 缓存的扇区号 */
+	uint8_t				buffer[BLOCK_SECTOR_SIZE];      /* 用来缓存实际数据 */
+	bool				dirty;                          /* dirty位，用来缓存实际的数据 */
+} cache_entry;
 
-  block_sector_t disk_sector;
-  uint8_t buffer[BLOCK_SECTOR_SIZE];
-
-  bool dirty; // dirty bit
-} QNode;
-
-// A Queue (A FIFO collection of Queue Nodes)
-typedef struct Queue
+/* cache队列 */
+typedef struct cache_queue
 {
-  unsigned count;          // Number of filled sector
-  unsigned numberOfSector; // total number of sector
-  QNode *front, *rear;
-} Queue;
+	unsigned	count;                                          /* cache队列中当前存在的扇区数量 */
+	unsigned	numberOfSector;                                 /* cache队列可容纳的扇区数量 */
+	cache_entry	*front, *rear;                                  /* 头尾指针 */
+} cache_queue;
 
-// A hash (Collection of pointers to Queue Nodes)
-typedef struct Hash
+/* cache哈希，用于快速查找cache条目 */
+typedef struct cache_map
 {
-  int capacity;  // how many sector can be there
-  QNode **array; // an array of queue nodes
-} Hash;
+	int		capacity;                                       /* 容量 */
+	cache_entry	**array;                                        /* 指向该位置对应的cache条目 */
+} cache_map;
 
-QNode *newQNode(block_sector_t sector);
-Queue *createQueue(int numberOfSector);
-Hash *createHash(int capacity);
-int AreAllSectorFull(Queue *queue);
-int isQueueEmpty(Queue *queue);
-void deQueue(Queue *queue);
-uint32_t hashFun(Hash *hash, block_sector_t sectorNum);
-void Enqueue(Queue *queue, Hash *hash, unsigned sectorNumber);
-void ReferenceSector(Queue *queue, Hash *hash, unsigned sectorNumber);
-void freeQueue(Queue *queue);
-QNode *read_ahead(block_sector_t sector);
+cache_entry *new_cache_entry( block_sector_t sector );
 
-/* Buffer cache entries. */
-static Queue *cache;
-static Hash *hash;
 
-// read head group size
+cache_queue *create_cache_queue( int numberOfSector );
+
+
+cache_map *create_cache_map( int capacity );
+
+
+int is_cache_full( cache_queue *queue );
+
+
+int is_cache_empty( cache_queue *queue );
+
+
+void de_cache_queue( cache_queue *queue );
+
+
+uint32_t cache_hash( cache_map *my_cache_map, block_sector_t sectorNum );
+
+
+void add_cache_entry( cache_queue *queue, cache_map *my_cache_map, unsigned sectorNumber );
+
+
+void ReferenceSector( cache_queue *queue, cache_map *my_cache_map, unsigned sectorNumber );
+
+
+void free_cache_queue( cache_queue *queue );
+
+
+cache_entry *read_ahead( block_sector_t sector );
+
+
+/* cache队列 */
+static cache_queue *my_cache_queue;
+
+/* cache 哈希表 */
+static cache_map *my_cache_map;
+
+/* 预读的 group大小 */
 static uint32_t read_head_group_size = 1;
-// the sector block last time read
+
+/* 上次读的扇区号 */
 static block_sector_t last_read_sector;
 
-/* A global lock for synchronizing buffer cache operations. */
+/* buffer cache 操作同步锁 */
 static struct lock buffer_cache_lock;
 
-void buffer_cache_init(void)
+
+/*
+ * buffer cache 初始化
+ */
+void buffer_cache_init( void )
 {
-  lock_init(&buffer_cache_lock);
-  cache = createQueue(BUFFER_CACHE_SIZE);
-  hash = createHash(BUFFER_CACHE_SIZE);
+	lock_init( &buffer_cache_lock );
+	my_cache_queue	= create_cache_queue( BUFFER_CACHE_SIZE );
+	my_cache_map	= create_cache_map( BUFFER_CACHE_SIZE );
 }
+
 
 /**
- * An internal method for flushing back the cache entry into disk.
- * Must be called with the lock held.
+ * 将cache中的数据写回磁盘
+ * 必须带锁操作
  */
-static void
-buffer_cache_flush(struct buffer_cache_entry_t *entry)
+static void buffer_cache_flush( struct buffer_cache_entry_t *entry )
 {
-  ASSERT(lock_held_by_current_thread(&buffer_cache_lock));
-  ASSERT(entry != NULL);
+	ASSERT( lock_held_by_current_thread( &buffer_cache_lock ) );
+	ASSERT( entry != NULL );
 
-  if (entry->dirty)
-  {
-    block_write(fs_device, entry->disk_sector, entry->buffer);
-    entry->dirty = false;
-  }
+	/* 将dirty的扇区写回磁盘  */
+	if ( entry->dirty )
+	{
+		block_write( fs_device, entry->disk_sector, entry->buffer );
+		entry->dirty = false;
+	}
 }
 
-void buffer_cache_close(void)
+
+/*
+ * 关闭buffer cache
+ */
+void buffer_cache_close( void )
 {
-  // flush buffer cache entries
-  lock_acquire(&buffer_cache_lock);
+	/* flush cache */
+	lock_acquire( &buffer_cache_lock );
 
-  size_t i;
-  for (i = 0; i < hash->capacity; ++i)
-  {
-    if (hash->array[i]->dirty)
-      buffer_cache_flush(hash->array[i]);
-  }
+	size_t i;
+	for ( i = 0; i < my_cache_map->capacity; ++i )
+	{
+		if ( my_cache_map->array[i]->dirty )
+			buffer_cache_flush( my_cache_map->array[i] );
+	}
 
-  // free
-  freeQueue(cache);
-  free(hash->array);
+	/* 释放队列*/
+	free_cache_queue( my_cache_queue );
+	free( my_cache_map->array );
 
-  lock_release(&buffer_cache_lock);
+	lock_release( &buffer_cache_lock );
 }
+
 
 /**
- * Lookup the cache entry, and returns the pointer of buffer_cache_entry_t,
- * or NULL in case of cache miss. (simply traverse the cache entries)
+ * 在缓存中查找cache条目
+ * 哈希查找
+ * 如果没找到，则返回NULL
  */
-static struct buffer_cache_entry_t *
-buffer_cache_lookup(block_sector_t sector)
+static struct buffer_cache_entry_t *buffer_cache_lookup( block_sector_t sector )
 {
-  // don't find
-  if (hashFun(hash, sector) == -1)
-  {
-    return NULL;
-  }
+	/* 没找到 */
+	if ( cache_hash( my_cache_map, sector ) == -1 )
+	{
+		return(NULL);
+	}
 
-  return hash->array[hashFun(hash, sector)];
+	return(my_cache_map->array[cache_hash( my_cache_map, sector )]);
 }
 
-void buffer_cache_read(block_sector_t sector, void *target)
+
+/*
+ * 读数据
+ */
+void buffer_cache_read( block_sector_t sector, void *target )
 {
-  lock_acquire(&buffer_cache_lock);
-  QNode *slot = read_ahead(sector);
-  // copy the buffer data into memory.
-  memcpy(target, slot->buffer, BLOCK_SECTOR_SIZE);
+	lock_acquire( &buffer_cache_lock );
+	cache_entry *slot = read_ahead( sector );
 
-  // read head
-  // 同步预读
-  if (slot->disk_sector > last_read_sector + read_head_group_size || slot->disk_sector < last_read_sector)
-  {
-    read_ahead(sector + 1);
-    read_head_group_size = 1;
-    last_read_sector = slot->disk_sector;
-  }
-  else
-  {
-    // 异步预读
-    size_t i = 0;
-    for (i = last_read_sector + read_head_group_size + 1; i <= last_read_sector + read_head_group_size + 3; i++)
-    {
-      read_ahead(i);
-    }
+	/* reger cache，更新其优先级 */
+	reference_sector( my_cache_queue, my_cache_map, sector );
 
-    read_head_group_size = read_head_group_size + 3;
-  }
+	/* 将数据复制到target  */
+	memcpy( target, slot->buffer, BLOCK_SECTOR_SIZE );
 
-  lock_release(&buffer_cache_lock);
+	/*同步预读 */
+	if ( slot->disk_sector > last_read_sector + read_head_group_size || slot->disk_sector < last_read_sector )
+	{
+		read_ahead( sector + 1 );
+		read_head_group_size	= 1;
+		last_read_sector	= slot->disk_sector;
+	}else  {
+		/* 异步预读 */
+		size_t i = 0;
+		for ( i = last_read_sector + read_head_group_size + 1; i <= last_read_sector + read_head_group_size + 3; i++ )
+		{
+			read_ahead( i );
+		}
+
+		/* 预读group以3为步长逐渐增长 */
+		read_head_group_size = read_head_group_size + 3;
+	}
+
+	lock_release( &buffer_cache_lock );
 }
 
-QNode *read_ahead(block_sector_t sector)
+
+/*
+ * 预读
+ */
+cache_entry *read_ahead( block_sector_t sector )
 {
-  struct buffer_cache_entry_t *slot = buffer_cache_lookup(sector);
-  if (slot == NULL)
-  {
-    // cache miss: need eviction.
-    Enqueue(cache, hash, sector);
-    slot = cache->front;
-    ASSERT(slot != NULL);
+	struct buffer_cache_entry_t *slot = buffer_cache_lookup( sector );
+	if ( slot == NULL )
+	{
+		/* 扇区不在cache中，从磁盘中读取 */
+		add_cache_entry( my_cache_queue, my_cache_map, sector );
+		slot = my_cache_queue->front;
+		ASSERT( slot != NULL );
 
-    // fill in the cache entry.
-    slot->dirty = false;
-    block_read(fs_device, sector, slot->buffer);
-  }
+		slot->dirty = false;
+		block_read( fs_device, sector, slot->buffer );
+	}
 
-  return slot;
+	return(slot);
 }
 
-void buffer_cache_write(block_sector_t sector, const void *source)
+
+/*
+ * 写数据到磁盘
+ */
+void buffer_cache_write( block_sector_t sector, const void *source )
 {
-  lock_acquire(&buffer_cache_lock);
+	lock_acquire( &buffer_cache_lock );
 
-  struct buffer_cache_entry_t *slot = buffer_cache_lookup(sector);
-  if (slot == NULL)
-  {
-    // cache miss: need eviction.
-    Enqueue(cache, hash, sector);
+	struct buffer_cache_entry_t *slot = buffer_cache_lookup( sector );
+	if ( slot == NULL )
+	{
+		/* 扇区不在cache中，从磁盘中读取 */
+		add_cache_entry( my_cache_queue, my_cache_map, sector );
 
-    slot = cache->front;
-    ASSERT(slot != NULL);
+		slot = my_cache_queue->front;
+		ASSERT( slot != NULL );
 
-    // fill in the cache entry.
-    slot->dirty = false;
-    lock_release(&buffer_cache_lock);
-    buffer_cache_read(sector, slot->buffer);
-    lock_acquire(&buffer_cache_lock);
-  }
+		slot->dirty = false;
+		lock_release( &buffer_cache_lock );
+		buffer_cache_read( sector, slot->buffer );
+		lock_acquire( &buffer_cache_lock );
+	}
 
-  // copy the data form memory into the buffer cache.
-  slot->dirty = true;
-  memcpy(slot->buffer, source, BLOCK_SECTOR_SIZE);
+	/* 将数据复制到缓存中  */
+	slot->dirty = true;
+	memcpy( slot->buffer, source, BLOCK_SECTOR_SIZE );
 
-  lock_release(&buffer_cache_lock);
+	lock_release( &buffer_cache_lock );
 }
 
-// A utility function to create a new Queue Node. The queue Node
-// will store the given 'sector'
-QNode *newQNode(block_sector_t sector)
+
+/*
+ * 创建一个新的cache条目
+ * 存储特定扇区的数据
+ */
+cache_entry *new_cache_entry( block_sector_t sector )
 {
-  // Allocate memory and assign 'sector'
-  QNode *temp = (QNode *)malloc(sizeof(QNode));
-  temp->disk_sector = sector;
+	/* 分配内存 */
+	cache_entry *temp = (cache_entry *) malloc( sizeof(cache_entry) );
+	temp->disk_sector = sector;
 
-  // Initialize prev and next as NULL
-  temp->prev = temp->next = NULL;
+	temp->prev = temp->next = NULL;
 
-  return temp;
+	return(temp);
 }
 
-// A utility function to create an empty Queue.
-// The queue can have at most 'numberOfSector' nodes
-Queue *createQueue(int numberOfSector)
+
+/*
+ * 创建空cache队列
+ */
+cache_queue *create_cache_queue( int numberOfSector )
 {
-  Queue *queue = (Queue *)malloc(sizeof(Queue));
+	cache_queue *queue = (cache_queue *) malloc( sizeof(cache_queue) );
 
-  // The queue is empty
-  queue->count = 0;
-  queue->front = queue->rear = NULL;
+	/* 队列为空 */
+	queue->count	= 0;
+	queue->front	= queue->rear = NULL;
 
-  // Number of sector that can be stored in memory
-  queue->numberOfSector = numberOfSector;
+	/* 队列容量 */
+	queue->numberOfSector = numberOfSector;
 
-  return queue;
+	return(queue);
 }
 
-// free queue
-void freeQueue(Queue *queue)
+
+/*
+ * 释放队列
+ */
+void free_cache_queue( cache_queue *queue )
 {
-  while (queue->count > 0)
-  {
-    deQueue(queue);
-  }
+	while ( queue->count > 0 )
+	{
+		de_cache_queue( queue );
+	}
 }
 
-// A utility function to create an empty Hash of given capacity
-Hash *createHash(int capacity)
+
+/*
+ * 创建一个新的cache哈希表
+ */
+cache_map *create_cache_map( int capacity )
 {
-  // Allocate memory for hash
-  Hash *hash = (Hash *)malloc(sizeof(Hash));
-  hash->capacity = capacity;
+	cache_map *my_cache_map = (cache_map *) malloc( sizeof(cache_map) );
+	my_cache_map->capacity = capacity;
 
-  // Create an array of pointers for refering queue nodes
-  hash->array = (QNode **)malloc(hash->capacity * sizeof(QNode *));
+	/* 指向cache条目 */
+	my_cache_map->array = (cache_entry * *) malloc( my_cache_map->capacity * sizeof(cache_entry *) );
 
-  // Initialize all hash entries as empty
-  int i;
-  for (i = 0; i < hash->capacity; ++i)
-    hash->array[i] = NULL;
+	/* 初始化为空 */
+	int i;
+	for ( i = 0; i < my_cache_map->capacity; ++i )
+		my_cache_map->array[i] = NULL;
 
-  return hash;
+	return(my_cache_map);
 }
 
-// A function to check if there is slot available in memory
-int AreAllSectorFull(Queue *queue)
+
+/*
+ * cache队列是否已满
+ */
+int is_cache_full( cache_queue *queue )
 {
-  return queue->count == queue->numberOfSector;
+	return(queue->count == queue->numberOfSector);
 }
 
-// A utility function to check if queue is empty
-int isQueueEmpty(Queue *queue)
+
+/*
+ * cache队列是否为空
+ */
+int is_cache_empty( cache_queue *queue )
 {
-  return queue->rear == NULL;
+	return(queue->rear == NULL);
 }
 
-// A utility function to delete a sector from queue
-void deQueue(Queue *queue)
+
+/*
+ * 从cache队列中删除一个cache条目
+ */
+void de_cache_queue( cache_queue *queue )
 {
-  if (isQueueEmpty(queue))
-    return;
+	if ( is_cache_empty( queue ) )
+		return;
 
-  // If this is the only node in list, then change front
-  if (queue->front == queue->rear)
-    queue->front = NULL;
+	/* 如果当前队列仅仅一个元素，设置队头为NULL */
+	if ( queue->front == queue->rear )
+		queue->front = NULL;
 
-  // Change rear and remove the previous rear
-  QNode *temp = queue->rear;
-  queue->rear = queue->rear->prev;
+	cache_entry *temp = queue->rear;
+	queue->rear = queue->rear->prev;
 
-  if (queue->rear)
-    queue->rear->next = NULL;
+	if ( queue->rear )
+		queue->rear->next = NULL;
 
-  // flush to disk
-  if (temp->dirty)
-  {
-    buffer_cache_flush(temp);
-  }
+	/* 删除cache前将数据写会磁盘 */
+	if ( temp->dirty )
+	{
+		buffer_cache_flush( temp );
+	}
 
-  free(temp);
+	free( temp );
 
-  // decrement the number of full sector by 1
-  queue->count--;
+	/* 更新cache队列长度 */
+	queue->count--;
 }
 
-// get hash location
-uint32_t hashFun(Hash *hash, block_sector_t sectorNum)
+
+/*
+ * cache哈希函数，使用线性探测法解决冲突
+ */
+uint32_t cache_hash( cache_map *my_cache_map, block_sector_t sectorNum )
 {
-  uint32_t tmp = sectorNum % hash->capacity;
-  uint32_t findCount = 0;
+	uint32_t	tmp		= sectorNum % my_cache_map->capacity;
+	uint32_t	findCount	= 0;
 
-  while (findCount < hash->capacity)
-  {
-    if (hash->array[tmp] == NULL)
-    {
-      return tmp;
-    }
-    else if (hash->array[tmp]->disk_sector == sectorNum)
-    {
-      return tmp;
-    }
+	while ( findCount < my_cache_map->capacity )
+	{
+		if ( my_cache_map->array[tmp] == NULL )
+		{
+			return(tmp);
+		}else if ( my_cache_map->array[tmp]->disk_sector == sectorNum )
+		{
+			return(tmp);
+		}
 
-    tmp = (tmp + 1) % hash->capacity;
-    findCount++;
-  }
+		tmp = (tmp + 1) % my_cache_map->capacity;
+		findCount++;
+	}
 
-  return -1;
+	return(-1);
 }
 
-// A function to add a sector with given 'sectorNumber' to both queue
-// and hash
-void Enqueue(Queue *queue, Hash *hash, unsigned sectorNumber)
+
+/*
+ * 添加cache条目，入队
+ */
+void add_cache_entry( cache_queue *queue, cache_map *my_cache_map, unsigned sectorNumber )
 {
-  // If all sectors are full, remove the sector at the rear
-  if (AreAllSectorFull(queue))
-  {
-    // remove sector from hash
-    hash->array[hashFun(hash, sectorNumber)] = NULL;
-    deQueue(queue);
-  }
+	/* 如果队列满，执行出队操作 */
+	if ( is_cache_full( queue ) )
+	{
+		/* 删除队尾cache条目 */
+		my_cache_map->array[cache_hash( my_cache_map, sectorNumber )] = NULL;
+		de_cache_queue( queue );
+	}
 
-  // Create a new node with given sector number,
-  // And add the new node to the front of queue
-  QNode *temp = newQNode(sectorNumber);
-  temp->next = queue->front;
 
-  // If queue is empty, change both front and rear pointers
-  if (isQueueEmpty(queue))
-    queue->rear = queue->front = temp;
-  else // Else change the front
-  {
-    queue->front->prev = temp;
-    queue->front = temp;
-  }
+	/*
+	 * 新建一个cache条目
+	 * 添加到队头
+	 */
+	cache_entry *temp = new_cache_entry( sectorNumber );
+	temp->next = queue->front;
 
-  // Add sector entry to hash also
-  hash->array[hashFun(hash, sectorNumber)] = temp;
+	/* 如果cache队列为空，队列头尾都是该节点 */
+	if ( is_cache_empty( queue ) )
+		queue->rear = queue->front = temp;
+	else{
+		queue->front->prev	= temp;
+		queue->front		= temp;
+	}
 
-  // increment number of full sectors
-  queue->count++;
+	/* 添加新条目到cache哈希表 */
+	my_cache_map->array[cache_hash( my_cache_map, sectorNumber )] = temp;
 
-  return temp;
+	queue->count++;
+
+	return(temp);
 }
 
-// This function is called when a sector with given 'sectorNumber' is referenced
-// from cache (or memory). There are two cases:
-// 1. Sector is not there in memory, we bring it in memory and add to the front
-//    of queue
-// 2. Sector is there in memory, we move the sector to front of queue
-void ReferenceSector(Queue *queue, Hash *hash, unsigned sectorNumber)
+
+/*
+ * refer 缓存
+ * 更新其优先级
+ * 两种情况：
+ *    1.存在cache中，放到队投
+ *    2.不在cache中，添加条目
+ */
+void reference_sector( cache_queue *queue, cache_map *my_cache_map, unsigned sector )
 {
-  QNode *reqSector = hash->array[hashFun(hash, sectorNumber)];
+	cache_entry *req_sector = my_cache_map->array[cache_hash( my_cache_map, sector )];
 
-  // the sector is not in cache, bring it
-  if (reqSector == NULL)
-    Enqueue(queue, hash, sectorNumber);
+	/* 如果扇区不在cache中，添加cache条目 */
+	if ( req_sector == NULL )
+		add_cache_entry( queue, my_cache_map, sector );
 
-  // sector is there and not at front, change pointer
-  else if (reqSector != queue->front)
-  {
-    // Unlink rquested sector from its current location
-    // in queue.
-    reqSector->prev->next = reqSector->next;
-    if (reqSector->next)
-      reqSector->next->prev = reqSector->prev;
+	else if ( req_sector != queue->front )
+	{
+		req_sector->prev->next = req_sector->next;
+		if ( req_sector->next )
+			req_sector->next->prev = req_sector->prev;
 
-    // If the requested sector is rear, then change rear
-    // as this node will be moved to front
-    if (reqSector == queue->rear)
-    {
-      queue->rear = reqSector->prev;
-      queue->rear->next = NULL;
-    }
+		/* 如果reger条目在队尾 */
+		if ( req_sector == queue->rear )
+		{
+			queue->rear		= req_sector->prev;
+			queue->rear->next	= NULL;
+		}
 
-    // Put the requested sector before current front
-    reqSector->next = queue->front;
-    reqSector->prev = NULL;
+		/* 放到队头 */
+		req_sector->next	= queue->front;
+		req_sector->prev	= NULL;
 
-    // Change prev of current front
-    reqSector->next->prev = reqSector;
+		req_sector->next->prev = req_sector;
 
-    // Change front to the requested sector
-    queue->front = reqSector;
-  }
+		queue->front = req_sector;
+	}
 }
